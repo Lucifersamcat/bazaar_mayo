@@ -39,6 +39,9 @@
     .btn-edit:hover { background: #f3f4f6; }
     .btn-secondary { background: #e5e7eb; color: #374151; }
     .btn-secondary:hover { background: #d1d5db; }
+    .btn-export { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+    .btn-export:hover { background: #e5e7eb; }
+    .data-btns { display: flex; gap: 8px; margin-left: auto; }
     .add-btn { margin-top: 8px; }
 
     .adder-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
@@ -82,6 +85,11 @@
       <input type="number" id="margin-input" min="0" max="99" step="1" value="30"> %
     </label>
     <span style="font-size:.8rem;color:#9ca3af">Precio = Costo ÷ (1 − margen)</span>
+    <div class="data-btns">
+      <button class="btn-export" onclick="exportData()">⬇ Exportar</button>
+      <button class="btn-export" onclick="importData()">⬆ Importar</button>
+      <input type="file" id="import-file" accept=".json" style="display:none" onchange="onImportFile(event)">
+    </div>
   </section>
 
   <section>
@@ -554,6 +562,41 @@
       renderBundleSummary()
     })
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal() })
+
+    // ── EXPORT / IMPORT ───────────────────────────────────────────────
+    function exportData() {
+      const json = JSON.stringify(state, null, 2)
+      const blob = new Blob([json], { type: 'application/json' })
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href     = url
+      a.download = `bazaar_mayo_${new Date().toISOString().slice(0,10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    }
+
+    function importData() {
+      document.getElementById('import-file').value = ''
+      document.getElementById('import-file').click()
+    }
+
+    function onImportFile(e) {
+      const file = e.target.files[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = ev => {
+        try {
+          const parsed = JSON.parse(ev.target.result)
+          if (!parsed.products || !parsed.extras || !parsed.envios) throw new Error()
+          state = { products: parsed.products, extras: parsed.extras, envios: parsed.envios, margin: parsed.margin ?? 30 }
+          saveState()
+          renderAll()
+        } catch {
+          alert('Archivo inválido. Asegúrate de importar un JSON exportado desde esta app.')
+        }
+      }
+      reader.readAsText(file)
+    }
 
     // ── INIT ──────────────────────────────────────────────────────────
     loadState()
