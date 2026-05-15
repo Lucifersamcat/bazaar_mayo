@@ -59,6 +59,19 @@
     .price-value { font-size: 2.4rem; font-weight: 700; color: #16a34a; letter-spacing: -.02em; }
 
     .bundle-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+    .bundle-error { color: #ef4444; font-size: .8rem; margin-top: 6px; display: none; text-align: right; }
+
+    .saved-bundle-list { display: flex; flex-direction: column; gap: 10px; }
+    .saved-bundle-card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; font-size: .82rem; }
+    .saved-bundle-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; gap: 8px; }
+    .saved-bundle-card-meta { font-size: .72rem; color: #9ca3af; margin-top: 1px; }
+    .saved-bundle-card-price { font-weight: 700; color: #16a34a; font-size: 1.1rem; white-space: nowrap; }
+    .saved-bundle-card-items { color: #6b7280; line-height: 1.5; margin-bottom: 8px; }
+    .saved-bundle-card-actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .btn-copy { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; font-size: .75rem; padding: 3px 8px; }
+    .btn-copy:hover { background: #e5e7eb; }
+    .stock-low  { color: #f59e0b; font-weight: 600; }
+    .stock-zero { color: #ef4444; font-weight: 600; }
 
     .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 100; align-items: center; justify-content: center; }
     .modal-backdrop.open { display: flex; }
@@ -146,8 +159,17 @@
       <div class="price-label">Precio sugerido</div>
       <div class="price-value" id="price-value">$0.00</div>
     </div>
+    <div class="bundle-error" id="bundle-error"></div>
     <div class="bundle-actions">
       <button class="btn-secondary" onclick="clearBundle()">Limpiar bundle</button>
+      <button class="btn-primary"   onclick="saveBundle()">Guardar bundle</button>
+    </div>
+  </section>
+
+  <section id="saved-bundles-section">
+    <h2>Bundles Guardados</h2>
+    <div class="saved-bundle-list" id="saved-bundle-list">
+      <div style="color:#bbb;font-style:italic;font-size:.85rem">Sin bundles guardados</div>
     </div>
   </section>
 
@@ -202,7 +224,7 @@
   <script>
     const STORAGE_KEY = 'bazaar_state'
 
-    let state = { products: [], extras: [], envios: [], margin: 30 }
+    let state = { products: [], extras: [], envios: [], savedBundles: [], margin: 30 }
     // products: { id, name, qty, price, envioId }
     // extras:   { id, name, qty, price, envioId }
     // envios:   { id, name, cost }
@@ -221,10 +243,11 @@
         if (raw) {
           const p = JSON.parse(raw)
           state = {
-            products: p.products || [],
-            extras:   p.extras   || [],
-            envios:   p.envios   || p.fletes || [], // migrate old "fletes" key
-            margin:   p.margin   ?? 30
+            products:     p.products     || [],
+            extras:       p.extras       || [],
+            envios:       p.envios       || p.fletes || [], // migrate old "fletes" key
+            savedBundles: p.savedBundles || [],
+            margin:       p.margin       ?? 30
           }
           // migrate old fleteId → envioId
           ;[...state.products, ...state.extras].forEach(item => {
@@ -300,6 +323,7 @@
       renderEnviosTable()
       renderBundleSelects()
       renderBundleSummary()
+      renderSavedBundles()
     }
 
     function renderItemTable(tableId, collection, type) {
@@ -313,7 +337,7 @@
         return `<tr>
           <td>${escHtml(item.name)}${en ? `<br><span style="color:#7c3aed;font-size:.7rem">✈ ${escHtml(en)}</span>` : ''}</td>
           <td>${fmt(unitCost(item))}</td>
-          <td class="muted">${item.qty ?? '—'}</td>
+          ${(() => { const q = parseInt(item.qty); if (isNaN(q) || item.qty == null) return '<td class="muted">—</td>'; if (q === 0) return `<td class="stock-zero">${q}</td>`; if (q <= 3) return `<td class="stock-low">${q}</td>`; return `<td class="muted">${q}</td>` })()}
           <td>
             <button class="btn-edit" onclick="openModal('${type}','${item.id}')">✎</button>
             <button class="btn-danger" onclick="deleteItem('${type}','${item.id}')">✕</button>
@@ -552,7 +576,138 @@
     function clearBundle() {
       bundle.products = []
       bundle.extras   = []
+      clearBundleError()
       renderBundleSummary()
+    }
+
+    // ── SAVED BUNDLES ─────────────────────────────────────────────────
+    function showBundleError(msg) {
+      const el = document.getElementById('bundle-error')
+      el.textContent = msg
+      el.style.display = 'block'
+    }
+
+    function clearBundleError() {
+      const el = document.getElementById('bundle-error')
+      el.textContent = ''
+      el.style.display = 'none'
+    }
+
+    function saveBundle() {
+      clearBundleError()
+      if (!bundle.products.length && !bundle.extras.length) {
+        showBundleError('El bundle está vacío.')
+        return
+      }
+      for (const bi of bundle.products) {
+        const p = state.products.find(p => p.id === bi.productId)
+        if (!p) { showBundleError('Producto eliminado del inventario. Limpia el bundle.'); return }
+        if (bi.qty > (parseInt(p.qty) || 0)) {
+          showBundleError(`Stock insuficiente para "${p.name}": necesitas ${bi.qty}, hay ${p.qty}.`)
+          return
+        }
+      }
+      for (const bi of bundle.extras) {
+        const e = state.extras.find(e => e.id === bi.extraId)
+        if (!e) { showBundleError('Extra eliminado del inventario. Limpia el bundle.'); return }
+        if (bi.qty > (parseInt(e.qty) || 0)) {
+          showBundleError(`Stock insuficiente para "${e.name}": necesitas ${bi.qty}, hay ${e.qty}.`)
+          return
+        }
+      }
+      const snapProducts = bundle.products.map(bi => {
+        const p = state.products.find(p => p.id === bi.productId)
+        return { productId: bi.productId, qty: bi.qty, name: p.name, unitCost: unitCost(p) }
+      })
+      const snapExtras = bundle.extras.map(bi => {
+        const e = state.extras.find(e => e.id === bi.extraId)
+        return { extraId: bi.extraId, qty: bi.qty, name: e.name, unitCost: unitCost(e) }
+      })
+      const total = bundleTotal()
+      const price = suggestedPrice()
+      state.savedBundles.unshift({
+        id:             genId(),
+        savedAt:        new Date().toISOString(),
+        products:       snapProducts,
+        extras:         snapExtras,
+        totalCost:      total,
+        suggestedPrice: isFinite(price) ? price : null
+      })
+      bundle.products.forEach(bi => {
+        const p = state.products.find(p => p.id === bi.productId)
+        p.qty = (parseInt(p.qty) || 0) - bi.qty
+      })
+      bundle.extras.forEach(bi => {
+        const e = state.extras.find(e => e.id === bi.extraId)
+        e.qty = (parseInt(e.qty) || 0) - bi.qty
+      })
+      saveState()
+      clearBundle()
+      renderAll()
+    }
+
+    function renderSavedBundles() {
+      const list = document.getElementById('saved-bundle-list')
+      if (!state.savedBundles.length) {
+        list.innerHTML = '<div style="color:#bbb;font-style:italic;font-size:.85rem">Sin bundles guardados</div>'
+        return
+      }
+      list.innerHTML = state.savedBundles.map(sb => {
+        const dateStr = new Date(sb.savedAt).toLocaleDateString('es-MX', {
+          day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+        })
+        const itemLines = [
+          ...sb.products.map(pi => `${escHtml(pi.name)} × ${pi.qty} (${fmt(pi.unitCost * pi.qty)})`),
+          ...sb.extras.map(xi   => `${escHtml(xi.name)} × ${xi.qty} <span style="color:#9ca3af;font-size:.72rem">(extra)</span> (${fmt(xi.unitCost * xi.qty)})`)
+        ].join('<br>')
+        const priceStr = sb.suggestedPrice != null ? fmt(sb.suggestedPrice) : '—'
+        return `<div class="saved-bundle-card">
+          <div class="saved-bundle-card-header">
+            <div>
+              <div style="font-weight:600;color:#374151">Bundle</div>
+              <div class="saved-bundle-card-meta">${escHtml(dateStr)}</div>
+            </div>
+            <div class="saved-bundle-card-price">${priceStr}</div>
+          </div>
+          <div class="saved-bundle-card-items">${itemLines}</div>
+          <div class="saved-bundle-card-actions">
+            <button class="btn-copy"   onclick="copyBundle('${sb.id}')">⎘ Copiar</button>
+            <button class="btn-danger" onclick="deleteSavedBundle('${sb.id}')">✕ Eliminar</button>
+          </div>
+        </div>`
+      }).join('')
+    }
+
+    function deleteSavedBundle(id) {
+      state.savedBundles = state.savedBundles.filter(sb => sb.id !== id)
+      saveState()
+      renderSavedBundles()
+    }
+
+    function copyBundle(id) {
+      const sb = state.savedBundles.find(sb => sb.id === id)
+      if (!sb) return
+      const date  = new Date(sb.savedAt).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' })
+      const lines = [
+        `Bundle — ${date}`, '',
+        ...sb.products.map(pi => `• ${pi.name} × ${pi.qty}  ${fmt(pi.unitCost * pi.qty)}`),
+        ...sb.extras.map(xi   => `• ${xi.name} × ${xi.qty} (extra)  ${fmt(xi.unitCost * xi.qty)}`),
+        '',
+        `Costo total:      ${fmt(sb.totalCost)}`,
+        `Precio sugerido:  ${sb.suggestedPrice != null ? fmt(sb.suggestedPrice) : '—'}`
+      ]
+      const text = lines.join('\n')
+      const setBtn = txt => {
+        const btn = document.querySelector(`[onclick="copyBundle('${id}')"]`)
+        if (btn) { btn.textContent = txt; if (txt === '✓ Copiado') setTimeout(() => { btn.textContent = '⎘ Copiar' }, 1500) }
+      }
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(() => setBtn('✓ Copiado')).catch(() => alert('No se pudo copiar:\n\n' + text))
+      } else {
+        const ta = Object.assign(document.createElement('textarea'), { value: text, style: 'position:fixed;opacity:0' })
+        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta)
+        setBtn('✓ Copiado')
+      }
     }
 
     // ── EVENTS ────────────────────────────────────────────────────────
@@ -588,7 +743,7 @@
         try {
           const parsed = JSON.parse(ev.target.result)
           if (!parsed.products || !parsed.extras || !parsed.envios) throw new Error()
-          state = { products: parsed.products, extras: parsed.extras, envios: parsed.envios, margin: parsed.margin ?? 30 }
+          state = { products: parsed.products, extras: parsed.extras, envios: parsed.envios, savedBundles: parsed.savedBundles || [], margin: parsed.margin ?? 30 }
           saveState()
           renderAll()
         } catch {
