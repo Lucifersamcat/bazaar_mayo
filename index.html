@@ -380,8 +380,8 @@
           <td>${fmt(e.cost)}</td>
           <td class="muted">${total > 0 ? `${total} u → ${fmt(perUnit)}/u` : '—'}</td>
           <td>
-            <button class="btn-edit" onclick="openModal('envio','${e.id}')">✎</button>
-            <button class="btn-danger" onclick="deleteItem('envio','${e.id}')">✕</button>
+            <button class="btn-edit" onclick="openModal('envio','${e.id}')" title="Editar">✎</button>
+            <button class="btn-danger" onclick="deleteItem('envio','${e.id}')" title="Eliminar">✕</button>
           </td>
         </tr>`
       }).join('')
