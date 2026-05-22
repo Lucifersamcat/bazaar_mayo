@@ -22,6 +22,11 @@
 
     .inventory-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
     @media (max-width: 700px) { .inventory-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 768px) {
+      body { height: auto; overflow: auto; }
+      .app-layout { grid-template-columns: 1fr; }
+      .panel { overflow-y: visible; }
+    }
 
     table { width: 100%; border-collapse: collapse; font-size: .8rem; }
     th { text-align: left; padding: 4px 6px; border-bottom: 2px solid #eee; color: #888; font-weight: 600; white-space: nowrap; }
@@ -187,8 +192,9 @@
       <!-- Campos para producto / extra -->
       <div id="fields-item">
         <div class="modal-field">
-          <label>Cantidad (unidades que tienes) *</label>
+          <label>Cantidad del lote de compra *</label>
           <input type="number" id="modal-qty" min="1" step="1" placeholder="100" oninput="updateComputedCost()">
+          <div class="hint">Denomina el costo unitario. No cambia al vender.</div>
         </div>
         <div class="modal-field">
           <label>Precio pagado por esa cantidad ($) *</label>
@@ -223,6 +229,7 @@
 
   <script>
     const STORAGE_KEY = 'bazaar_state'
+    const BUNDLE_KEY  = 'bazaar_bundle'
 
     let state = { products: [], extras: [], envios: [], savedBundles: [], margin: 30 }
     // products: { id, name, qty, price, envioId }
@@ -234,7 +241,8 @@
     // bundle.products: [{ productId, qty }]
     // bundle.extras:   [{ extraId, qty }]
 
-    let modalCtx = { type: null, id: null }
+    let modalCtx       = { type: null, id: null }
+    let envioUnitsCache = new Map()
 
     // ── STATE ──────────────────────────────────────────────────────────
     function loadState() {
@@ -249,9 +257,10 @@
             savedBundles: p.savedBundles || [],
             margin:       p.margin       ?? 30
           }
-          // migrate old fleteId → envioId
+          // migrate old fleteId → envioId; backfill stock for pre-V3 items
           ;[...state.products, ...state.extras].forEach(item => {
             if (item.fleteId !== undefined) { item.envioId = item.fleteId; delete item.fleteId }
+            if (item.stock === undefined) item.stock = item.qty
           })
         }
       } catch (e) {}
@@ -266,20 +275,33 @@
     }
 
     // ── COMPUTED ──────────────────────────────────────────────────────
-    // Total units of all items (products + extras) assigned to a given envio
     function totalUnitsInEnvio(envioId) {
       const all = [...state.products, ...state.extras]
       return all.filter(x => x.envioId === envioId)
                 .reduce((sum, x) => sum + (parseFloat(x.qty) || 0), 0)
     }
 
-    // Full unit cost = base cost per unit + proportional share of envio cost
+    // Returns remaining stock; falls back to qty for items created before the stock split
+    function getStock(item) {
+      return item.stock !== undefined ? (parseInt(item.stock) || 0) : (parseInt(item.qty) || 0)
+    }
+
+    function buildEnvioCache() {
+      envioUnitsCache = new Map()
+      const all = [...state.products, ...state.extras]
+      for (const e of state.envios) {
+        const total = all.filter(x => x.envioId === e.id)
+                        .reduce((sum, x) => sum + (parseFloat(x.qty) || 0), 0)
+        envioUnitsCache.set(e.id, total)
+      }
+    }
+
     function unitCost(item) {
       const base = (parseFloat(item.price) || 0) / (parseFloat(item.qty) || 1)
       if (!item.envioId) return base
       const envio = state.envios.find(e => e.id === item.envioId)
       if (!envio) return base
-      const total = totalUnitsInEnvio(item.envioId)
+      const total = envioUnitsCache.size > 0 ? (envioUnitsCache.get(item.envioId) || 0) : totalUnitsInEnvio(item.envioId)
       const share = total > 0 ? (parseFloat(envio.cost) || 0) / total : 0
       return base + share
     }
@@ -317,6 +339,7 @@
     }
 
     function renderAll() {
+      buildEnvioCache()
       document.getElementById('margin-input').value = state.margin
       renderProductsTable()
       renderExtrasTable()
@@ -337,10 +360,11 @@
         return `<tr>
           <td>${escHtml(item.name)}${en ? `<br><span style="color:#7c3aed;font-size:.7rem">✈ ${escHtml(en)}</span>` : ''}</td>
           <td>${fmt(unitCost(item))}</td>
-          ${(() => { const q = parseInt(item.qty); if (isNaN(q) || item.qty == null) return '<td class="muted">—</td>'; if (q === 0) return `<td class="stock-zero">${q}</td>`; if (q <= 3) return `<td class="stock-low">${q}</td>`; return `<td class="muted">${q}</td>` })()}
+          ${(() => { const q = getStock(item); if (isNaN(q)) return '<td class="muted">—</td>'; if (q === 0) return `<td class="stock-zero">${q}</td>`; if (q <= 3) return `<td class="stock-low">${q}</td>`; return `<td class="muted">${q}</td>` })()}
           <td>
-            <button class="btn-edit" onclick="openModal('${type}','${item.id}')">✎</button>
-            <button class="btn-danger" onclick="deleteItem('${type}','${item.id}')">✕</button>
+            <button class="btn-edit" onclick="openModal('${type}','${item.id}')" title="Editar">✎</button>
+            <button class="btn-edit" onclick="restockItem('${type}','${item.id}')" title="Restock">＋</button>
+            <button class="btn-danger" onclick="deleteItem('${type}','${item.id}')" title="Eliminar">✕</button>
           </td>
         </tr>`
       }).join('')
@@ -363,8 +387,8 @@
           <td>${fmt(e.cost)}</td>
           <td class="muted">${total > 0 ? `${total} u → ${fmt(perUnit)}/u` : '—'}</td>
           <td>
-            <button class="btn-edit" onclick="openModal('envio','${e.id}')">✎</button>
-            <button class="btn-danger" onclick="deleteItem('envio','${e.id}')">✕</button>
+            <button class="btn-edit" onclick="openModal('envio','${e.id}')" title="Editar">✎</button>
+            <button class="btn-danger" onclick="deleteItem('envio','${e.id}')" title="Eliminar">✕</button>
           </td>
         </tr>`
       }).join('')
@@ -515,7 +539,7 @@
         if (!qty || qty < 1)           { showModalError('Ingresa una cantidad válida.'); return }
         if (isNaN(price) || price < 0) { showModalError('Ingresa un precio válido.'); return }
         if (modalCtx.id) Object.assign(collection.find(x => x.id === modalCtx.id), { name, qty, price, envioId })
-        else             collection.push({ id: genId(), name, qty, price, envioId })
+        else             collection.push({ id: genId(), name, qty, price, envioId, stock: qty })
       }
 
       saveState()
@@ -530,6 +554,22 @@
     }
 
     function deleteItem(type, id) {
+      const collection = type === 'product' ? state.products : type === 'extra' ? state.extras : state.envios
+      const item = collection.find(x => x.id === id)
+      if (!item) return
+
+      if (type === 'envio') {
+        const affected = [...state.products, ...state.extras].filter(x => x.envioId === id)
+        if (affected.length > 0) {
+          const names = affected.map(x => x.name).join(', ')
+          if (!confirm(`Este envío está asignado a: ${names}.\nAl eliminarlo esos items perderán el costo de envío. ¿Continuar?`)) return
+        } else {
+          if (!confirm(`¿Eliminar envío "${item.name}"?`)) return
+        }
+      } else {
+        if (!confirm(`¿Eliminar "${item.name}"?`)) return
+      }
+
       if (type === 'product') {
         state.products  = state.products.filter(p => p.id !== id)
         bundle.products = bundle.products.filter(bi => bi.productId !== id)
@@ -538,16 +578,32 @@
         bundle.extras = bundle.extras.filter(bi => bi.extraId !== id)
       } else {
         state.envios = state.envios.filter(e => e.id !== id)
-        // items that referenced this envio lose the association
-        ;[...state.products, ...state.extras].forEach(item => {
-          if (item.envioId === id) item.envioId = null
-        })
+        ;[...state.products, ...state.extras].forEach(it => { if (it.envioId === id) it.envioId = null })
       }
+      saveBundleState()
       saveState()
       renderAll()
     }
 
     // ── BUNDLE ACTIONS ────────────────────────────────────────────────
+    function checkBundleStockWarnings() {
+      for (const bi of bundle.products) {
+        const p = state.products.find(p => p.id === bi.productId)
+        if (p && bi.qty > getStock(p)) {
+          showBundleError(`Stock insuficiente: "${p.name}" (tienes ${getStock(p)}, necesitas ${bi.qty})`)
+          return
+        }
+      }
+      for (const bi of bundle.extras) {
+        const e = state.extras.find(e => e.id === bi.extraId)
+        if (e && bi.qty > getStock(e)) {
+          showBundleError(`Stock insuficiente: "${e.name}" (tienes ${getStock(e)}, necesitas ${bi.qty})`)
+          return
+        }
+      }
+      clearBundleError()
+    }
+
     function addToBundle(type) {
       if (type === 'product') {
         const productId = document.getElementById('product-select').value
@@ -564,18 +620,23 @@
         if (ex) ex.qty += qty
         else    bundle.extras.push({ extraId, qty })
       }
+      saveBundleState()
+      checkBundleStockWarnings()
       renderBundleSummary()
     }
 
     function removeFromBundle(type, id) {
       if (type === 'product') bundle.products = bundle.products.filter(bi => bi.productId !== id)
       else                    bundle.extras   = bundle.extras.filter(bi => bi.extraId !== id)
+      saveBundleState()
+      checkBundleStockWarnings()
       renderBundleSummary()
     }
 
     function clearBundle() {
       bundle.products = []
       bundle.extras   = []
+      localStorage.removeItem(BUNDLE_KEY)
       clearBundleError()
       renderBundleSummary()
     }
@@ -602,19 +663,25 @@
       for (const bi of bundle.products) {
         const p = state.products.find(p => p.id === bi.productId)
         if (!p) { showBundleError('Producto eliminado del inventario. Limpia el bundle.'); return }
-        if (bi.qty > (parseInt(p.qty) || 0)) {
-          showBundleError(`Stock insuficiente para "${p.name}": necesitas ${bi.qty}, hay ${p.qty}.`)
+        if (bi.qty > getStock(p)) {
+          showBundleError(`Stock insuficiente para "${p.name}": necesitas ${bi.qty}, hay ${getStock(p)}.`)
           return
         }
       }
       for (const bi of bundle.extras) {
         const e = state.extras.find(e => e.id === bi.extraId)
         if (!e) { showBundleError('Extra eliminado del inventario. Limpia el bundle.'); return }
-        if (bi.qty > (parseInt(e.qty) || 0)) {
-          showBundleError(`Stock insuficiente para "${e.name}": necesitas ${bi.qty}, hay ${e.qty}.`)
+        if (bi.qty > getStock(e)) {
+          showBundleError(`Stock insuficiente para "${e.name}": necesitas ${bi.qty}, hay ${getStock(e)}.`)
           return
         }
       }
+      const confirmLines = [
+        ...bundle.products.map(bi => { const p = state.products.find(p => p.id === bi.productId); return p ? `• ${p.name} × ${bi.qty}` : '' }),
+        ...bundle.extras.map(bi => { const e = state.extras.find(e => e.id === bi.extraId); return e ? `• ${e.name} × ${bi.qty} (extra)` : '' })
+      ].filter(Boolean)
+      if (!confirm(`Guardar bundle y descontar stock:\n\n${confirmLines.join('\n')}\n\nPrecio sugerido: ${fmt(suggestedPrice())}`)) return
+
       const snapProducts = bundle.products.map(bi => {
         const p = state.products.find(p => p.id === bi.productId)
         return { productId: bi.productId, qty: bi.qty, name: p.name, unitCost: unitCost(p) }
@@ -635,11 +702,11 @@
       })
       bundle.products.forEach(bi => {
         const p = state.products.find(p => p.id === bi.productId)
-        p.qty = (parseInt(p.qty) || 0) - bi.qty
+        p.stock = getStock(p) - bi.qty
       })
       bundle.extras.forEach(bi => {
         const e = state.extras.find(e => e.id === bi.extraId)
-        e.qty = (parseInt(e.qty) || 0) - bi.qty
+        e.stock = getStock(e) - bi.qty
       })
       saveState()
       clearBundle()
@@ -671,6 +738,7 @@
           </div>
           <div class="saved-bundle-card-items">${itemLines}</div>
           <div class="saved-bundle-card-actions">
+            <button class="btn-secondary" onclick="loadSavedBundle('${sb.id}')">↩ Cargar</button>
             <button class="btn-copy"   onclick="copyBundle('${sb.id}')">⎘ Copiar</button>
             <button class="btn-danger" onclick="deleteSavedBundle('${sb.id}')">✕ Eliminar</button>
           </div>
@@ -679,9 +747,88 @@
     }
 
     function deleteSavedBundle(id) {
+      if (!confirm('¿Eliminar este bundle guardado?')) return
       state.savedBundles = state.savedBundles.filter(sb => sb.id !== id)
       saveState()
       renderSavedBundles()
+    }
+
+    function loadSavedBundle(id) {
+      const sb = state.savedBundles.find(sb => sb.id === id)
+      if (!sb) return
+      if ((bundle.products.length || bundle.extras.length) &&
+          !confirm('¿Reemplazar el bundle actual con este?')) return
+
+      bundle.products = []
+      bundle.extras   = []
+      const skipped   = []
+
+      sb.products.forEach(pi => {
+        const p = state.products.find(p => p.id === pi.productId)
+        if (p && getStock(p) >= pi.qty) bundle.products.push({ productId: pi.productId, qty: pi.qty })
+        else skipped.push(pi.name)
+      })
+      sb.extras.forEach(xi => {
+        const e = state.extras.find(e => e.id === xi.extraId)
+        if (e && getStock(e) >= xi.qty) bundle.extras.push({ extraId: xi.extraId, qty: xi.qty })
+        else skipped.push(xi.name)
+      })
+
+      if (skipped.length) alert(`No se pudieron cargar por stock insuficiente:\n${skipped.join(', ')}`)
+      saveBundleState()
+      checkBundleStockWarnings()
+      renderBundleSummary()
+      document.getElementById('bundle-summary').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+
+    function restockItem(type, id) {
+      const col = type === 'product' ? state.products : state.extras
+      const source = col.find(x => x.id === id)
+      if (!source) return
+      const baseName = source.name.replace(/\s*\(lote \d+\)$/i, '')
+      const loteCount = col.filter(x => x.name.replace(/\s*\(lote \d+\)$/i, '') === baseName).length
+      openModal(type, null)
+      document.getElementById('modal-name').value = `${baseName} (lote ${loteCount + 1})`
+      if (source.envioId) {
+        document.getElementById('modal-envio-select').value = source.envioId
+        updateComputedCost()
+      }
+    }
+
+    function showCopyFallback(text) {
+      const overlay = document.createElement('div')
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;display:flex;align-items:center;justify-content:center'
+      const inner = document.createElement('div')
+      inner.style.cssText = 'background:#fff;border-radius:10px;padding:20px;width:340px;max-width:95vw'
+      inner.innerHTML = `<p style="font-size:.85rem;margin-bottom:8px;color:#555">Copia el texto (Ctrl+A, Ctrl+C):</p>
+        <textarea style="width:100%;height:140px;font-size:.78rem;border:1px solid #ccc;border-radius:4px;padding:8px;resize:none" readonly></textarea>
+        <div style="text-align:right;margin-top:10px"><button style="background:#e5e7eb;border:none;border-radius:4px;padding:6px 14px;cursor:pointer;font-size:.85rem">Cerrar</button></div>`
+      const ta = inner.querySelector('textarea')
+      ta.value = text
+      inner.querySelector('button').onclick = () => document.body.removeChild(overlay)
+      overlay.appendChild(inner)
+      document.body.appendChild(overlay)
+      ta.select()
+    }
+
+    function validateImport(parsed) {
+      if (!Array.isArray(parsed.products) || !Array.isArray(parsed.extras) || !Array.isArray(parsed.envios)) return false
+      const validItem = x => x && typeof x.id === 'string' && typeof x.name === 'string'
+      return parsed.products.every(validItem) && parsed.extras.every(validItem) && parsed.envios.every(validItem)
+    }
+
+    function saveBundleState() {
+      localStorage.setItem(BUNDLE_KEY, JSON.stringify(bundle))
+    }
+
+    function loadBundleState() {
+      try {
+        const raw = localStorage.getItem(BUNDLE_KEY)
+        if (!raw) return
+        const b = JSON.parse(raw)
+        bundle.products = (b.products || []).filter(bi => state.products.find(p => p.id === bi.productId))
+        bundle.extras   = (b.extras   || []).filter(bi => state.extras.find(e => e.id === bi.extraId))
+      } catch (e) {}
     }
 
     function copyBundle(id) {
@@ -702,11 +849,9 @@
         if (btn) { btn.textContent = txt; if (txt === '✓ Copiado') setTimeout(() => { btn.textContent = '⎘ Copiar' }, 1500) }
       }
       if (navigator.clipboard?.writeText) {
-        navigator.clipboard.writeText(text).then(() => setBtn('✓ Copiado')).catch(() => alert('No se pudo copiar:\n\n' + text))
+        navigator.clipboard.writeText(text).then(() => setBtn('✓ Copiado')).catch(() => showCopyFallback(text))
       } else {
-        const ta = Object.assign(document.createElement('textarea'), { value: text, style: 'position:fixed;opacity:0' })
-        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta)
-        setBtn('✓ Copiado')
+        showCopyFallback(text)
       }
     }
 
@@ -742,12 +887,12 @@
       reader.onload = ev => {
         try {
           const parsed = JSON.parse(ev.target.result)
-          if (!parsed.products || !parsed.extras || !parsed.envios) throw new Error()
+          if (!validateImport(parsed)) { alert('Archivo inválido. Verifica que sea un JSON exportado desde esta app con productos, extras y envíos válidos.'); return }
           state = { products: parsed.products, extras: parsed.extras, envios: parsed.envios, savedBundles: parsed.savedBundles || [], margin: parsed.margin ?? 30 }
           saveState()
           renderAll()
         } catch {
-          alert('Archivo inválido. Asegúrate de importar un JSON exportado desde esta app.')
+          alert('Error al leer el archivo. Asegúrate de que sea un JSON válido.')
         }
       }
       reader.readAsText(file)
@@ -755,6 +900,7 @@
 
     // ── INIT ──────────────────────────────────────────────────────────
     loadState()
+    loadBundleState()
     renderAll()
   </script>
 </body>
