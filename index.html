@@ -192,8 +192,9 @@
       <!-- Campos para producto / extra -->
       <div id="fields-item">
         <div class="modal-field">
-          <label>Cantidad (unidades que tienes) *</label>
+          <label>Cantidad del lote de compra *</label>
           <input type="number" id="modal-qty" min="1" step="1" placeholder="100" oninput="updateComputedCost()">
+          <div class="hint">Denomina el costo unitario. No cambia al vender.</div>
         </div>
         <div class="modal-field">
           <label>Precio pagado por esa cantidad ($) *</label>
@@ -256,9 +257,10 @@
             savedBundles: p.savedBundles || [],
             margin:       p.margin       ?? 30
           }
-          // migrate old fleteId → envioId
+          // migrate old fleteId → envioId; backfill stock for pre-V3 items
           ;[...state.products, ...state.extras].forEach(item => {
             if (item.fleteId !== undefined) { item.envioId = item.fleteId; delete item.fleteId }
+            if (item.stock === undefined) item.stock = item.qty
           })
         }
       } catch (e) {}
@@ -277,6 +279,11 @@
       const all = [...state.products, ...state.extras]
       return all.filter(x => x.envioId === envioId)
                 .reduce((sum, x) => sum + (parseFloat(x.qty) || 0), 0)
+    }
+
+    // Returns remaining stock; falls back to qty for items created before the stock split
+    function getStock(item) {
+      return item.stock !== undefined ? (parseInt(item.stock) || 0) : (parseInt(item.qty) || 0)
     }
 
     function buildEnvioCache() {
@@ -353,7 +360,7 @@
         return `<tr>
           <td>${escHtml(item.name)}${en ? `<br><span style="color:#7c3aed;font-size:.7rem">✈ ${escHtml(en)}</span>` : ''}</td>
           <td>${fmt(unitCost(item))}</td>
-          ${(() => { const q = parseInt(item.qty); if (isNaN(q) || item.qty == null) return '<td class="muted">—</td>'; if (q === 0) return `<td class="stock-zero">${q}</td>`; if (q <= 3) return `<td class="stock-low">${q}</td>`; return `<td class="muted">${q}</td>` })()}
+          ${(() => { const q = getStock(item); if (isNaN(q)) return '<td class="muted">—</td>'; if (q === 0) return `<td class="stock-zero">${q}</td>`; if (q <= 3) return `<td class="stock-low">${q}</td>`; return `<td class="muted">${q}</td>` })()}
           <td>
             <button class="btn-edit" onclick="openModal('${type}','${item.id}')" title="Editar">✎</button>
             <button class="btn-edit" onclick="restockItem('${type}','${item.id}')" title="Restock">＋</button>
@@ -532,7 +539,7 @@
         if (!qty || qty < 1)           { showModalError('Ingresa una cantidad válida.'); return }
         if (isNaN(price) || price < 0) { showModalError('Ingresa un precio válido.'); return }
         if (modalCtx.id) Object.assign(collection.find(x => x.id === modalCtx.id), { name, qty, price, envioId })
-        else             collection.push({ id: genId(), name, qty, price, envioId })
+        else             collection.push({ id: genId(), name, qty, price, envioId, stock: qty })
       }
 
       saveState()
@@ -582,15 +589,15 @@
     function checkBundleStockWarnings() {
       for (const bi of bundle.products) {
         const p = state.products.find(p => p.id === bi.productId)
-        if (p && bi.qty > (parseInt(p.qty) || 0)) {
-          showBundleError(`Stock insuficiente: "${p.name}" (tienes ${p.qty}, necesitas ${bi.qty})`)
+        if (p && bi.qty > getStock(p)) {
+          showBundleError(`Stock insuficiente: "${p.name}" (tienes ${getStock(p)}, necesitas ${bi.qty})`)
           return
         }
       }
       for (const bi of bundle.extras) {
         const e = state.extras.find(e => e.id === bi.extraId)
-        if (e && bi.qty > (parseInt(e.qty) || 0)) {
-          showBundleError(`Stock insuficiente: "${e.name}" (tienes ${e.qty}, necesitas ${bi.qty})`)
+        if (e && bi.qty > getStock(e)) {
+          showBundleError(`Stock insuficiente: "${e.name}" (tienes ${getStock(e)}, necesitas ${bi.qty})`)
           return
         }
       }
@@ -656,16 +663,16 @@
       for (const bi of bundle.products) {
         const p = state.products.find(p => p.id === bi.productId)
         if (!p) { showBundleError('Producto eliminado del inventario. Limpia el bundle.'); return }
-        if (bi.qty > (parseInt(p.qty) || 0)) {
-          showBundleError(`Stock insuficiente para "${p.name}": necesitas ${bi.qty}, hay ${p.qty}.`)
+        if (bi.qty > getStock(p)) {
+          showBundleError(`Stock insuficiente para "${p.name}": necesitas ${bi.qty}, hay ${getStock(p)}.`)
           return
         }
       }
       for (const bi of bundle.extras) {
         const e = state.extras.find(e => e.id === bi.extraId)
         if (!e) { showBundleError('Extra eliminado del inventario. Limpia el bundle.'); return }
-        if (bi.qty > (parseInt(e.qty) || 0)) {
-          showBundleError(`Stock insuficiente para "${e.name}": necesitas ${bi.qty}, hay ${e.qty}.`)
+        if (bi.qty > getStock(e)) {
+          showBundleError(`Stock insuficiente para "${e.name}": necesitas ${bi.qty}, hay ${getStock(e)}.`)
           return
         }
       }
@@ -695,11 +702,11 @@
       })
       bundle.products.forEach(bi => {
         const p = state.products.find(p => p.id === bi.productId)
-        p.qty = (parseInt(p.qty) || 0) - bi.qty
+        p.stock = getStock(p) - bi.qty
       })
       bundle.extras.forEach(bi => {
         const e = state.extras.find(e => e.id === bi.extraId)
-        e.qty = (parseInt(e.qty) || 0) - bi.qty
+        e.stock = getStock(e) - bi.qty
       })
       saveState()
       clearBundle()
@@ -758,12 +765,12 @@
 
       sb.products.forEach(pi => {
         const p = state.products.find(p => p.id === pi.productId)
-        if (p && (parseInt(p.qty) || 0) >= pi.qty) bundle.products.push({ productId: pi.productId, qty: pi.qty })
+        if (p && getStock(p) >= pi.qty) bundle.products.push({ productId: pi.productId, qty: pi.qty })
         else skipped.push(pi.name)
       })
       sb.extras.forEach(xi => {
         const e = state.extras.find(e => e.id === xi.extraId)
-        if (e && (parseInt(e.qty) || 0) >= xi.qty) bundle.extras.push({ extraId: xi.extraId, qty: xi.qty })
+        if (e && getStock(e) >= xi.qty) bundle.extras.push({ extraId: xi.extraId, qty: xi.qty })
         else skipped.push(xi.name)
       })
 
